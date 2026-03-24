@@ -1,0 +1,133 @@
+# PostgreSQL StatefulSet for auth-service.
+#
+# WHY StatefulSet (not Deployment):
+#   - Stable, predictable pod name: auth-postgres-0
+#   - Stable network identity via headless service
+#   - volumeClaimTemplates provisions a dedicated PVC per pod
+#     that survives pod restarts and rescheduling
+#   - Ordered startup/shutdown guarantees data consistency
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: auth-postgres
+  namespace: auth-postgres
+  labels:
+    app.kubernetes.io/name:      auth-postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/version:   "16"
+spec:
+  serviceName: auth-postgres-headless   # must match headless Service name
+  replicas: 1                           # single primary — scale with read replicas if needed
+  selector:
+    matchLabels:
+      app: auth-postgres
+  template:
+    metadata:
+      labels:
+        app:                         auth-postgres
+        app.kubernetes.io/name:      auth-postgres
+        app.kubernetes.io/component: database
+    spec:
+      # ── Security ─────────────────────────────────────────────────────────────
+      securityContext:
+        runAsUser:    999   # postgres user inside the official image
+        runAsGroup:   999
+        fsGroup:      999   # ensures mounted volume is writable by postgres user
+        runAsNonRoot: true
+
+      terminationGracePeriodSeconds: 60   # give postgres time to flush & checkpoint
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name:          postgres
+              containerPort: 5432
+              protocol:      TCP
+
+          # ── Credentials from Secret ─────────────────────────────────────────
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key:  POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key:  POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key:  POSTGRES_DB
+            # PGDATA must be a subdirectory of the mount point
+            # The parent dir is owned by root; pgdata subdir is created by postgres
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          # ── Health probes ───────────────────────────────────────────────────
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 30
+            periodSeconds:       10
+            timeoutSeconds:      5
+            failureThreshold:    5
+
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 10
+            periodSeconds:       5
+            timeoutSeconds:      3
+            failureThreshold:    3
+            successThreshold:    1
+
+          # ── Resources ───────────────────────────────────────────────────────
+          resources:
+            requests:
+              cpu:    "100m"
+              memory: "256Mi"
+            limits:
+              cpu:    "500m"
+              memory: "512Mi"
+
+          # ── Volume mount ────────────────────────────────────────────────────
+          volumeMounts:
+            - name:      auth-postgres-data
+              mountPath: /var/lib/postgresql/data
+
+  # ── PVC Template ─────────────────────────────────────────────────────────────
+  # Kubernetes automatically creates one PVC per pod replica.
+  # PVC name: auth-postgres-data-auth-postgres-0
+  # The PVC persists independently — deleting the StatefulSet does NOT delete PVCs.
+  volumeClaimTemplates:
+    - metadata:
+        name: auth-postgres-data
+        labels:
+          app.kubernetes.io/name:      auth-postgres
+          app.kubernetes.io/component: storage
+      spec:
+        accessModes:
+          - ReadWriteOnce       # Only one node can mount this volume at a time (appropriate for single primary)
+        resources:
+          requests:
+            storage: 5Gi        # Adjust based on expected data volume
+        # storageClassName: ""  # Uncomment and set to your StorageClass name
+        #                       # Leave blank to use the cluster default StorageClass
+        #                       # For kubeadm: use "local-path" (k3s) or install
+        #                       # a StorageClass like Longhorn / OpenEBS / NFS
