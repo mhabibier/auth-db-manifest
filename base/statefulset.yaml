@@ -1,11 +1,4 @@
 # PostgreSQL StatefulSet for auth-service.
-#
-# WHY StatefulSet (not Deployment):
-#   - Stable, predictable pod name: auth-postgres-0
-#   - Stable network identity via headless service
-#   - volumeClaimTemplates provisions a dedicated PVC per pod
-#     that survives pod restarts and rescheduling
-#   - Ordered startup/shutdown guarantees data consistency
 
 apiVersion: apps/v1
 kind: StatefulSet
@@ -18,7 +11,7 @@ metadata:
     app.kubernetes.io/version:   "16"
 spec:
   serviceName: auth-postgres-headless   # must match headless Service name
-  replicas: 1                           # single primary — scale with read replicas if needed
+  replicas: 1
   selector:
     matchLabels:
       app: auth-postgres
@@ -29,15 +22,12 @@ spec:
         app.kubernetes.io/name:      auth-postgres
         app.kubernetes.io/component: database
     spec:
-      # ── Security ─────────────────────────────────────────────────────────────
-      securityContext:
-        runAsUser:    999   # postgres user inside the official image
-        runAsGroup:   999
-        fsGroup:      999   # ensures mounted volume is writable by postgres user
-        runAsNonRoot: true
-
-      terminationGracePeriodSeconds: 60   # give postgres time to flush & checkpoint
-
+      # securityContext:
+      #   runAsUser:    999
+      #   runAsGroup:   999
+      #   fsGroup:      999
+      #   runAsNonRoot: true
+      # terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: postgres:16-alpine
@@ -46,8 +36,6 @@ spec:
             - name:          postgres
               containerPort: 5432
               protocol:      TCP
-
-          # ── Credentials from Secret ─────────────────────────────────────────
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -64,12 +52,8 @@ spec:
                 secretKeyRef:
                   name: auth-postgres-secret
                   key:  POSTGRES_DB
-            # PGDATA must be a subdirectory of the mount point
-            # The parent dir is owned by root; pgdata subdir is created by postgres
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
-
-          # ── Health probes ───────────────────────────────────────────────────
           livenessProbe:
             exec:
               command:
@@ -82,7 +66,6 @@ spec:
             periodSeconds:       10
             timeoutSeconds:      5
             failureThreshold:    5
-
           readinessProbe:
             exec:
               command:
@@ -96,8 +79,6 @@ spec:
             timeoutSeconds:      3
             failureThreshold:    3
             successThreshold:    1
-
-          # ── Resources ───────────────────────────────────────────────────────
           resources:
             requests:
               cpu:    "100m"
@@ -105,16 +86,10 @@ spec:
             limits:
               cpu:    "500m"
               memory: "512Mi"
-
-          # ── Volume mount ────────────────────────────────────────────────────
           volumeMounts:
             - name:      auth-postgres-data
               mountPath: /var/lib/postgresql/data
 
-  # ── PVC Template ─────────────────────────────────────────────────────────────
-  # Kubernetes automatically creates one PVC per pod replica.
-  # PVC name: auth-postgres-data-auth-postgres-0
-  # The PVC persists independently — deleting the StatefulSet does NOT delete PVCs.
   volumeClaimTemplates:
     - metadata:
         name: auth-postgres-data
@@ -123,11 +98,8 @@ spec:
           app.kubernetes.io/component: storage
       spec:
         accessModes:
-          - ReadWriteOnce       # Only one node can mount this volume at a time (appropriate for single primary)
+          - ReadWriteOnce
         resources:
           requests:
             storage: 5Gi        # Adjust based on expected data volume
-        # storageClassName: ""  # Uncomment and set to your StorageClass name
-        #                       # Leave blank to use the cluster default StorageClass
-        #                       # For kubeadm: use "local-path" (k3s) or install
-        #                       # a StorageClass like Longhorn / OpenEBS / NFS
+        storageClassName: "ceph-rbd-sc"
