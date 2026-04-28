@@ -1,4 +1,4 @@
-# auth-postgres/configmap.yaml
+# PostgreSQL configuration for auth-service database.
 
 apiVersion: v1
 kind: ConfigMap

@@ -1,3 +1,5 @@
+# PostgreSQL Services for auth-service database.
+
 apiVersion: v1
 kind: Service
 metadata:
